@@ -1,7 +1,5 @@
 // TODO: Add documentation.
 // TODO: Better logging.
-// TODO: Don't use regex and read line by line into a map.
-// TODO: !vnltier map_name
 // TODO: Retry when http request fails (status code 0 happens occasionally).
 
 // Edge cases:
@@ -9,78 +7,111 @@
 // "kz_intercourse!"
 // "N/A" tier for kzpro
 
+#include <json>
 #include <sourcemod>
 #include <SteamWorks>
 #include <regex>
 
+#define MAX_BODY_LENGTH 50000
+#define MAX_URL_LENGTH 200
+#define MAX_MAP_NAME_LENGTH 100
+#define MAX_MAP_COUNT 1000
+
+#define FEASIBLE 0
+#define UNFEASIBLE 1
+#define IMPOSSIBLE 2
+
+#pragma newdecls required
 #pragma tabsize 0
 #pragma semicolon 1
 
-char body[50000]; // buffer used to hold http body response
 char sheets_api_key[40]; // google sheets api key
 char base_url[91] = "https://sheets.googleapis.com/v4/spreadsheets/1avMaSsZ5h7u21LpRz04kk6cn-PPHucA95T745Jj21MM"; // url to google sheet
 
-bool c_finish, u_finish, map_found, map_possible, error;
-char tp_tier[3], pro_tier[3];
+char map_names[MAX_MAP_COUNT][MAX_MAP_NAME_LENGTH];
+int tp_tiers[MAX_MAP_COUNT], pro_tiers[MAX_MAP_COUNT];
+int num_maps;
+
+char feasible_map_names[MAX_MAP_COUNT][MAX_MAP_NAME_LENGTH], unfeasible_map_names[MAX_MAP_COUNT][MAX_MAP_NAME_LENGTH], impossible_map_names[MAX_MAP_COUNT][MAX_MAP_NAME_LENGTH];
+int num_feasible_maps, num_unfeasible_maps, num_impossible_maps;
+
+char prefixes[][] = {"kz_", "xc_", "bkz_", "skz_", "vnl_", "kzpro_"};
+char unfeasible[] = "Unfeasible Maps", impossible[] = "Impossible Maps";
 
 public Plugin myinfo = {
 	name = "Vanilla Tier",
 	author = "nobody",
 	description = "Provides !tier for vanilla kz.",
-	version = "0.0.5",
+	version = "0.0.6",
 	url = "https://kiwisclub.co/" 
 };
 
 public void OnPluginStart() {
-    // RegAdminCmd("sm_debug", Debug, ADMFLAG_CHANGEMAP);
-	RegConsoleCmd("sm_vnltier", VanillaTier, "Show the map's vanilla tier in the chat.");
+    RegConsoleCmd("sm_vnltier", VanillaTier, "Show the map's vanilla tier in the chat.");
 
     // read API key from configs/vnltier.ini
-    char filename[200];
+    char filename[200], buffer[500];
     BuildPath(Path_SM, filename, sizeof(filename), "configs/vnltier.ini");
     File file = OpenFile(filename, "rt");
     if (!file) {
         PrintToServer("VNLTier: Cannot find configs/vnltier.ini.");
         return;
     }
-    file.ReadLine(sheets_api_key, sizeof(sheets_api_key));
+    ReadFileString(file, buffer, sizeof(buffer) -1);
     file.Close();
+
+    JSON_Object obj = json_decode(buffer);
+    obj.GetString("key", sheets_api_key, sizeof(sheets_api_key));
+    json_cleanup_and_delete(obj);
+    // PrintToServer("VNLTier: API key is %s", sheets_api_key);
 }
 
-// public Action Debug(int client, int args) {
-//     // OnMapStart();
-//     PrintToServer("error: %s", error ? "true" : "false");
-//     PrintToServer("c_finish: %s", c_finish ? "true" : "false");
-//     PrintToServer("u_finish: %s", u_finish ? "true" : "false");
-//     PrintToServer("map_found: %s", map_found ? "true" : "false");
-//     PrintToServer("map_possible: %s", map_possible ? "true" : "false");
-//     PrintToServer("TP Tier: %s", tp_tier);
-//     PrintToServer("PRO Tier: %s", pro_tier);
-//     // PrintToServer("API Key: %s", sheets_api_key);
-// }
+public bool isDigit(char c) {
+    return '0' <= c && c <= '9';
+}
+
+public bool checkPrefix(const char[] s, const char[] prefix) {
+    if (strlen(s) < strlen(prefix)) {
+        return false;
+    }
+    for (int i = 0; i < strlen(prefix); i++) {
+        if (s[i] != prefix[i]) {
+            return false;
+        }
+    }
+    return true;
+}
 
 /**
- * Returns if map name is valid under global team's rules (alphabet + digits + _).
- * Does not check prefix (kz, bkz, etc.).
- * Assumes only exception is kz_intercourse!.
+ * Returns if map name is valid under global team's rules.
+ * Exception is "kz_intercourse!"".
  * 
- * @param map_name     Map name
+ * @param name         Map name
  * @return             Validity of map name
  */
-public bool isValidMapName(char[] map_name) {
-    if (strcmp(map_name, "kz_intercourse!") == 0) {
+public bool isValidMapName(const char[] name) {
+    if (strcmp(name, "kz_intercourse!") == 0) {
         return true;
     }
-    int n = strlen(map_name);
+    bool flag = true;
+    for (int i = 0; i < sizeof(prefixes); i++) {
+        if (checkPrefix(name, prefixes[i])) {
+            flag = true;
+        }
+    }
+    if (!flag) {
+        return false;
+    }
+    int n = strlen(name);
     for (int i = 0; i < n; i++) {
-        bool flag = false;
-        if ('a' <= map_name[i] && map_name[i] <= 'z') {
+        flag = false;
+        if ('a' <= name[i] && name[i] <= 'z') {
             flag = true;
         }
-        if ('0' <= map_name[i] && map_name[i] <= '9') {
+        if (isDigit(name[i])) {
             flag = true;
         }
-        if (map_name[i] == '_') {
+        if (name[i] == '_') {
             flag = true;
         }
         if (!flag) {
@@ -90,8 +121,8 @@ public bool isValidMapName(char[] map_name) {
     return true;
 }
 
-public GetCurrentMapName(char[] buffer, int n) {
-    char tmp[500];
+public void GetCurrentMapName(char[] buffer, int n) {
+    char tmp[MAX_MAP_NAME_LENGTH + 30];
     GetCurrentMap(tmp, sizeof(tmp));
     // if hosting map from workshop, map name will be "workshop/[id #]/[map name]"
     if (StrContains(tmp, "/") != -1) {
@@ -105,170 +136,156 @@ public GetCurrentMapName(char[] buffer, int n) {
 }
 
 public void OnMapStart() {
-    c_finish = false;
-    u_finish = false;
-    map_found = false;
-    error = false;
-
-    char map_name[100];
-    GetCurrentMapName(map_name, sizeof(map_name));
-    
-    if (isValidMapName(map_name)) {
-        updateCompletedTier();
-        updateUncompletedTier();
-    }
-    else {
-        map_found = false;
-        c_finish = true;
-        u_finish =true;
-    }
-}
-
-public bool api_error(char[] s) {
-    if (StrContains(s, "\"error\":") != -1) {
-        if (StrContains(s, "API key not valid") != -1) {
-            PrintToServer("VNLTier: API key not valid.");
-        }
-        else {
-            Regex regex = CompileRegex("\"code\": (\\d+)");
-            regex.MatchAll(s);
-            char error_code[3];
-            regex.GetSubString(1, error_code, sizeof(error_code));
-            PrintToServer("VNLTier: Google Sheets API error code: %d", error_code);
-
-            regex = CompileRegex("\"message\": \"(.*)\"");
-            regex.MatchAll(s);
-            char error_message[200];
-            regex.GetSubString(1, error_message, sizeof(error_message));
-            PrintToServer("VNLTier: Google Sheets API error message: %d", error_message);
-        }
-        return true;
-    }
-    return false;
+    num_maps = 0;
+    num_feasible_maps = 0;
+    num_unfeasible_maps = 0;
+    num_impossible_maps = 0;
+    updateCompletedTier();
+    updateUncompletedTier();
 }
 
 public void updateCompletedTier() {
-    char url[200];
+    char url[MAX_URL_LENGTH];
     Format(url, sizeof(url), "%s/values/'Map%%20Tiers'!A:C/?key=%s", base_url, sheets_api_key);
-    int handle = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
+    Handle handle = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
     SteamWorks_SetHTTPCallbacks(handle, HTTPCompletedTier);
     SteamWorks_SendHTTPRequest(handle);
 }
 
 public int HTTPCompletedTier(Handle HTTPRequest, bool bFailure, bool bRequestSuccessful, EHTTPStatusCode eStatusCode) {
-    if (!bRequestSuccessful) {
+    if (eStatusCode != k_EHTTPStatusCode200OK) {
         PrintToServer("VNLTier: HTTP request not successful. Status code %d.", eStatusCode);
-        error = true;
     }
     else {
-        int size = -1;
+        int size;
+        static char body[MAX_BODY_LENGTH];
         SteamWorks_GetHTTPResponseBodySize(HTTPRequest, size);
         PrintToServer("VNLTier: Received %d bytes.", size);
         SteamWorks_GetHTTPResponseBodyData(HTTPRequest, body, size);
-        CloseHandle(HTTPRequest);
+        body[size] = 0;
 
-        if (api_error(body)) {
-            error = true;
-        }
-        else {
-            char map_name[100], regex_raw[200] = "\\[\\s*\"\\s*";
-            GetCurrentMapName(map_name, sizeof(map_name)); // TODO: edit this to handle any given map name by user (figure out how to pass data via handle)
-            StrCat(regex_raw, sizeof(regex_raw), map_name);
-            StrCat(regex_raw, sizeof(regex_raw), "\\s*\",\\s*\"(\\d+|N/A)\",\\s*\"(\\d+|N/A)\"\\s*\\]");
-            Regex regex = CompileRegex(regex_raw);
-            int numMatches = regex.MatchAll(body);
-            if (numMatches != 0) {
-                map_found = true;
-                map_possible = true;
-                regex.GetSubString(1, tp_tier, sizeof(tp_tier));
-                regex.GetSubString(2, pro_tier, sizeof(pro_tier));
+        JSON_Object obj = json_decode(body);
+        JSON_Array values = view_as<JSON_Array>(obj.GetObject("values"));
+        int n = values.Length;
+        char buffer[MAX_MAP_NAME_LENGTH];
+        for (int i = 0; i < n; i++) {
+            JSON_Array row = view_as<JSON_Array>(values.GetObject(i));
+            if (row.Length != 3) {
+                continue;
+            }
+            row.GetString(0, buffer, sizeof(buffer));
+            TrimString(buffer);
+            if (isValidMapName(buffer)) {
+                strcopy(map_names[num_maps], MAX_MAP_NAME_LENGTH, buffer);
+
+                row.GetString(1, buffer, sizeof(buffer));
+                if (isDigit(buffer[0])) {
+                    tp_tiers[num_maps] = buffer[0] - '0';
+                }
+                else {
+                    tp_tiers[num_maps] = -1;
+                }
+                
+                row.GetString(2, buffer, sizeof(buffer));
+                pro_tiers[num_maps] = buffer[0] - '0';
+
+                num_maps++;
             }
         }
+        json_cleanup_and_delete(obj);
     }
-    c_finish = true;
+    CloseHandle(HTTPRequest);
 }
 
 public void updateUncompletedTier() {
-    char url[200];
-    Format(url, sizeof(url), "%s/values/'Uncompleted%%20Maps'!A:A/?key=%s", base_url, sheets_api_key);
-    int handle = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
+    char url[MAX_URL_LENGTH];
+    Format(url, sizeof(url), "%s/values/'Uncompleted%%20Maps'!A:A/?majorDimension=COLUMNS&key=%s", base_url, sheets_api_key);
+    Handle handle = SteamWorks_CreateHTTPRequest(k_EHTTPMethodGET, url);
     SteamWorks_SetHTTPCallbacks(handle, HTTPUncompletedTier);
     SteamWorks_SendHTTPRequest(handle);
 }
 
 public int HTTPUncompletedTier(Handle HTTPRequest, bool bFailure, bool bRequestSuccessful, EHTTPStatusCode eStatusCode) {
-    if (!bRequestSuccessful) {
+    if (eStatusCode != k_EHTTPStatusCode200OK) {
         PrintToServer("VNLTier: HTTP request not successful. Status code %d.", eStatusCode);
-        error = true;
     }
     else {
-        int size = -1;
+        int size;
+        static char body[MAX_BODY_LENGTH];
         SteamWorks_GetHTTPResponseBodySize(HTTPRequest, size);
         PrintToServer("VNLTier: Received %d bytes.", size);
         SteamWorks_GetHTTPResponseBodyData(HTTPRequest, body, size);
-        CloseHandle(HTTPRequest);
+        body[size] = 0;
 
-        if (api_error(body)) {
-            error = true;
-        }
-        else {
-            char map_name[100];
-            GetCurrentMapName(map_name, sizeof(map_name)); // TODO: edit this to handle any given map name by user (figure out how to pass data via handle)
-            char regex_t8[200] = "\"Feasible Maps\".*\"\\s*", regex_t9[200] = "\"Unfeasible Maps\".*\"\\s*", regex_t10[200] = "\"Impossible Maps\".*\"\\s*";
-            
-            StrCat(regex_t8, sizeof(regex_t8), map_name);
-            StrCat(regex_t9, sizeof(regex_t9), map_name);
-            StrCat(regex_t10, sizeof(regex_t10), map_name);
-
-            StrCat(regex_t8, sizeof(regex_t8), "\\s*\".*\"Unfeasible Maps\"");
-            StrCat(regex_t9, sizeof(regex_t9), "\\s*\".*\"Impossible Maps\"");
-            StrCat(regex_t10, sizeof(regex_t10), "\\s*\"");
-            
-            Regex regex = CompileRegex(regex_t8, PCRE_DOTALL);
-            bool t8 = (regex.MatchAll(body) > 0);
-            regex = CompileRegex(regex_t9, PCRE_DOTALL);
-            bool t9 = (regex.MatchAll(body) > 0);
-            regex = CompileRegex(regex_t10, PCRE_DOTALL);
-            bool t10 = (regex.MatchAll(body) > 0);
-            
-            if (t8) {
-                map_found = true;
-                map_possible = true;
-                tp_tier = "8";
-                pro_tier = "9";
+        JSON_Object obj = json_decode(body);
+        JSON_Array values = view_as<JSON_Array>(obj.GetObject("values"));
+        JSON_Array value = view_as<JSON_Array>(values.GetObject(0));
+        int n = value.Length;
+        char buffer[MAX_MAP_NAME_LENGTH];
+        int mode = FEASIBLE;
+        for (int i = 0; i < n; i++) {
+            value.GetString(i, buffer, sizeof(buffer));
+            TrimString(buffer);
+            if (strcmp(buffer, unfeasible) == 0) {
+                mode = UNFEASIBLE;
             }
-            else if (t9) {
-                map_found = true;
-                map_possible = true;
-                tp_tier = "9";
-                pro_tier = "9";
+            else if (strcmp(buffer, impossible) == 0) {
+                mode = IMPOSSIBLE;
             }
-            else if (t10) {
-                map_found = true;
-                map_possible = false;
+            else if (isValidMapName(buffer)) {
+                if (mode == FEASIBLE) {
+                    strcopy(feasible_map_names[num_feasible_maps], MAX_MAP_NAME_LENGTH, buffer);
+                    num_feasible_maps++;
+                }
+                else if (mode == UNFEASIBLE) {
+                    strcopy(unfeasible_map_names[num_unfeasible_maps], MAX_MAP_NAME_LENGTH, buffer);
+                    num_unfeasible_maps++;
+                }
+                else {
+                    strcopy(impossible_map_names[num_impossible_maps], MAX_MAP_NAME_LENGTH, buffer);
+                    num_impossible_maps++;
+                }
             }
         }
+        json_cleanup_and_delete(obj);
     }
-    u_finish = true;
+    CloseHandle(HTTPRequest);
 }
 
 public Action VanillaTier(int client, int args) {
-    if (error) {
-        PrintToChat(client, "[VNL] Something went wrong. Contact adminstrator.");
-    }
-    else if (!c_finish || !u_finish) {
-        PrintToChat(client, "[VNL] Retrieving tiers... try again.");
-    }
-    else if (map_found) {
-        if (map_possible) {
-            PrintToChat(client, "[VNL] TP Tier: %s", tp_tier);
-            PrintToChat(client, "[VNL] PRO Tier: %s", pro_tier);
-        }
-        else {
-            PrintToChat(client, "[VNL] Map not possible in vanilla.");
-        }
+    char name[MAX_MAP_NAME_LENGTH];
+    if (args == 0) {
+        GetCurrentMapName(name, sizeof(name));
     }
     else {
-        PrintToChat(client, "[VNL] Map not found.");
+        GetCmdArg(1, name, sizeof(name));
     }
+    for (int i = 0; i < num_maps; i++) {
+        if (strcmp(name, map_names[i], false) == 0) {
+            if (tp_tiers[i] != -1) {
+                PrintToChat(client, "[VNL] TP Tier: %d", tp_tiers[i]);
+            }
+            PrintToChat(client, "[VNL] PRO Tier: %d", pro_tiers[i]);
+            return;
+        }
+    }
+    for (int i = 0; i < num_feasible_maps; i++) {
+        if (strcmp(name, feasible_map_names[i], false) == 0) {
+            PrintToChat(client, "[VNL] Map is feasible but uncompleted in vanilla.");
+            return;
+        }
+    }
+    for (int i = 0; i < num_unfeasible_maps; i++) {
+        if (strcmp(name, unfeasible_map_names[i], false) == 0) {
+            PrintToChat(client, "[VNL] Map is unfeasible in vanilla.");
+            return;
+        }
+    }
+    for (int i = 0; i < num_impossible_maps; i++) {
+        if (strcmp(name, impossible_map_names[i], false) == 0) {
+            PrintToChat(client, "[VNL] Map is impossible in vanilla.");
+            return;
+        }
+    }
+    PrintToChat(client, "[VNL] Map not found.");
 }

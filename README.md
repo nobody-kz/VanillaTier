@@ -15,21 +15,22 @@ Vanilla tiers are pulled from [this spreadsheet](https://docs.google.com/spreads
     - Click "Create Credentials" and create a new API Key.
     - Copy the API Key. The API key is a long string containing upper and lower case letters, numbers, and dashes, such as `a4db08b7-5729-4ba9-8c08-f2df493465a1`.
     - (Optional: edit the API Key so that it is only accessible from your server's IP.)
-- Dump the API Key into a new file `csgo/addons/sourcemod/configs/vnltier.ini`.
+- Set up the initialization file `csgo/addons/sourcemod/configs/vnltier.ini`.
+    - The file should contain a single JSON object with key `key` and value as your API Key.
+    - Example:
+  ```
+    {
+        "key": "a4db08b7-5729-4ba9-8c08-f2df493465a1"
+    }
+  ```
 - Compile the plugin yourself or use the provided `VanillaTier.smx` file in the latest release.
 - Add the `VanillaTier.smx` file to `csgo/addons/sourcemod/plugins`.
 - Enter `sm plugins refresh` into the server console.
 
 ## Usage
-Type `!vnltier` into the chat.
+Type `!vnltier` or `!vnltier [map name]` into the chat.
 
-Details on tiers:
-- Uncompleted maps are still given tiers:
-    - Feasible maps are given a TP tier of 8 and a PRO tier of 9.
-    - Unfeasible maps are given a TP and PRO tier of 9.
-- If a map is impossible in vanilla, the command will return "Map not possible in vanilla."
-
-Checking the vanilla tier of any map (`!vnltier map_name`) will be implemented in the future.
+Currently the full map name needs to be specified.
 
 ## Contact
 If you have any questions or concerns, contact me on Discord at `nobody#9768`.
